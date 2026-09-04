@@ -1,0 +1,6 @@
+-r requirements.txt
+
+# Test and static-analysis tools used by the local development workflow.
+pytest>=8.0,<10
+pytest-asyncio>=0.23,<2
+mypy>=1.10,<2

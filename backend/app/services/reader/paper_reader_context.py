@@ -1,0 +1,725 @@
+
+from __future__ import annotations
+
+import os
+import re
+import time
+import logging
+from typing import Any
+
+from ...infrastructure.db import Database
+
+logger = logging.getLogger(__name__)
+
+def extract_pdf_text_full(abspath: str | None) -> str:
+    """Extract full PDF text. Uses enhanced extractor with OCR + dedup, falls back to original."""
+    try:
+        from .pdf_extract import extract_pdf_text_enhanced
+        result = extract_pdf_text_enhanced(abspath)
+        if result and len(result) >= 200:
+            return result
+    except Exception:
+        pass
+    # Fallback to original logic
+    if not abspath or not os.path.isfile(abspath):
+        return ""
+    best = ""
+    try:
+        import pymupdf4llm
+        best = (pymupdf4llm.to_markdown(abspath) or "").strip()
+    except Exception:
+        pass
+    try:
+        import fitz
+        doc = fitz.open(abspath)
+        pages: list[str] = []
+        for page in doc:
+            t = page.get_text("text")
+            if t:
+                pages.append(t.strip())
+        doc.close()
+        fitz_text = "\n\n".join(pages).strip()
+        if not best or (len(best) < 500 and len(fitz_text) > len(best) * 3):
+            best = fitz_text
+    except Exception:
+        pass
+    if len(best) < 200:
+        try:
+            import fitz
+            doc = fitz.open(abspath)
+            blocks: list[str] = []
+            for page in doc:
+                for block in page.get_text("blocks") or []:
+                    if len(block) >= 5 and block[4].strip():
+                        blocks.append(str(block[4]).strip())
+            doc.close()
+            block_text = "\n".join(blocks).strip()
+            if len(block_text) > len(best):
+                best = block_text
+        except Exception:
+            pass
+    return best
+
+
+def extract_pdf_text_with_pages(abspath: str | None) -> list[dict]:
+    """Extract PDF text as per-page dicts with 1-based page numbers.
+
+    Uses enhanced extractor with OCR + header/footer dedup, falls back to original.
+    """
+    try:
+        from .pdf_extract import extract_pdf_pages_enhanced
+        result = extract_pdf_pages_enhanced(abspath)
+        if result:
+            return result
+    except Exception:
+        pass
+    # Fallback to original logic
+    if not abspath or not os.path.isfile(abspath):
+        return []
+    out: list[dict] = []
+    try:
+        import pymupdf4llm
+        chunks = pymupdf4llm.to_markdown(abspath, page_chunks=True)
+        if isinstance(chunks, list) and chunks:
+            for item in chunks:
+                if not isinstance(item, dict):
+                    continue
+                text = str(item.get("text") or "").strip()
+                if not text:
+                    continue
+                meta = item.get("metadata") or {}
+                try:
+                    page = int(meta.get("page_number") or 0)
+                except (TypeError, ValueError):
+                    page = 0
+                if page <= 0:
+                    continue
+                out.append({"page": page, "text": text})
+            if out:
+                return out
+    except Exception:
+        pass
+    try:
+        import fitz
+        doc = fitz.open(abspath)
+        for i, page in enumerate(doc):
+            t = (page.get_text("text") or "").strip()
+            if t:
+                out.append({"page": i + 1, "text": t})
+        doc.close()
+    except Exception:
+        pass
+    return out
+
+
+def extract_pdf_tables_markdown(abspath: str | None) -> str:
+    """Extract tables from PDF as Markdown. Uses fitz's built-in table detection first,
+    then falls back to pymupdf4llm."""
+    if not abspath or not os.path.isfile(abspath):
+        return ""
+    tables: list[str] = []
+
+    # Method 1: fitz page.find_tables() — best for structured tables
+    try:
+        import fitz
+        doc = fitz.open(abspath)
+        for page in doc:
+            try:
+                tabs = page.find_tables()
+            except Exception:
+                tabs = None
+            if tabs:
+                for tab in tabs:
+                    try:
+                        md = tab.to_markdown()
+                        if md and "|" in str(md) and len(str(md)) > 20:
+                            tables.append(str(md).strip())
+                    except Exception:
+                        pass
+        doc.close()
+    except Exception:
+        pass
+
+    if not tables:
+        # Method 2: pymupdf4llm Markdown — parses full doc
+        try:
+            import pymupdf4llm
+            md = (pymupdf4llm.to_markdown(abspath) or "").strip()
+            for m in re.finditer(r"(\|[^\n]+\|\n\|[-:| ]+\|\n(?:\|[^\n]+\|\n?)+)", md):
+                tables.append(m.group(1).strip())
+        except Exception:
+            pass
+
+    if not tables:
+        # Method 3: fitz text blocks — last resort
+        try:
+            import fitz
+            doc = fitz.open(abspath)
+            for page in doc:
+                blocks = page.get_text("dict", flags=fitz.TEXT_PRESERVE_WHITESPACE)["blocks"]
+                for block in blocks:
+                    if block.get("type") != 0:
+                        continue
+                    lines = block.get("lines", [])
+                    if len(lines) < 2:
+                        continue
+                    spans_by_line = [[s["text"] for s in ln["spans"]] for ln in lines]
+                    # Tabular data typically has 3+ aligned columns
+                    ncols = min(len(spans) for spans in spans_by_line)
+                    if ncols < 3:
+                        continue
+                    # Build markdown table by columns
+                    cols = [[] for _ in range(ncols)]
+                    for spans in spans_by_line:
+                        for j in range(ncols):
+                            cols[j].append(spans[j].strip())
+                    md_rows = [" | ".join(cols[i]) for i in range(ncols)]
+                    # Reformat: each original row → one markdown row
+                    nrows = len(cols[0])
+                    result = [" | ".join(str(cols[c][r]) for c in range(ncols)) for r in range(nrows)]
+                    result.insert(1, " | ".join("---" for _ in range(ncols)))
+                    tables.append("\n".join(result))
+            doc.close()
+        except Exception:
+            pass
+
+    return "\n\n".join(tables) if tables else ""
+
+def preprocess_pdf_text_for_reference_blob(blob: str) -> str:
+    try:
+        import ftfy
+        return ftfy.fix_text(blob or "")
+    except ImportError:
+        return (blob or "").replace("\r\n", "\n").replace("\r", "\n").replace("\f", "\n")
+
+def soft_unwrap_reference_section_newlines(blob: str) -> str:
+    s = preprocess_pdf_text_for_reference_blob(blob or "")
+
+    s = re.sub(r",\s*\n(?!\n)", ", ", s)
+
+    s = re.sub(r"(?<=[,.])\s*\n(?!\s*\n)\s*(?=[A-Za-z0-9(\u4e00-\u9fff])", " ", s)
+    s = re.sub(r"\n{4,}", "\n\n\n", s)
+    s = re.sub(r"[ \t]{2,}", " ", s)
+    return s.strip()
+
+def normalize_saved_reference_entry(text: str) -> str:
+    s = (text or "").strip()
+    if not s:
+        return ""
+    s = re.sub(r"([A-Za-z]{2,})-\s*\r?\n\s*([A-Za-z]{2,})", r"\1\2", s)
+    s = re.sub(r"([A-Za-z]{2,})-\s{1,3}([A-Za-z]{2,})", r"\1\2", s)
+    s = re.sub(r"[\s\u00a0\u2000-\u200b\u202f\u2060\ufeff]+", " ", s).strip()
+    return s
+
+_REF_SECTION = re.compile(
+    r"(?:^|\n)\s*(?:"
+    r"References|REFERENCES|Bibliography|BIBLIOGRAPHY|"
+    r"参考文献|引用文献|參考文獻"
+    r")\s*\n",
+    re.MULTILINE,
+)
+
+def extract_references_section_raw_from_pdf_text(pdf_text: str) -> str:
+    t = (pdf_text or "").strip()
+    if len(t) < 120:
+        return ""
+    m = _REF_SECTION.search(t)
+    body = t[m.end():].strip() if m else t[-min(len(t), 48000):]
+    body = soft_unwrap_reference_section_newlines(body)
+    return (body or "").strip()
+
+_REF_FALLBACK_ENTRY_HEAD = re.compile(
+    r"^(?:\[\d{1,3}\]\s*)?(?:[A-Z][a-zA-Z'\u2019\-]{1,42},\s+[A-Z.\-]|\d{1,3}\.\s+[A-Za-z0-9])"
+)
+_REF_FALLBACK_DOI_LINE = re.compile(r"^doi:\s*10\.\d", re.I)
+
+def reference_strings_for_resolve_fallback(section_raw: str, *, max_strings: int = 80) -> list[str]:
+    if not (section_raw or "").strip():
+        return []
+    text = soft_unwrap_reference_section_newlines(section_raw)
+    lines = [ln.strip() for ln in text.split("\n") if (ln or "").strip()]
+    out: list[str] = []
+    buf = ""
+    for ln in lines:
+        if re.match(r"^(figure|fig\.|table|tab\.|appendix|section)\b", ln, re.I):
+            if buf:
+                s = re.sub(r"\s+", " ", buf.strip())
+                if len(s) >= 28:
+                    out.append(normalize_saved_reference_entry(s)[:520])
+                buf = ""
+            continue
+        starts = bool(_REF_FALLBACK_ENTRY_HEAD.match(ln) or _REF_FALLBACK_DOI_LINE.match(ln))
+        if starts and buf:
+            s = re.sub(r"\s+", " ", buf.strip())
+            if len(s) >= 28:
+                out.append(normalize_saved_reference_entry(s)[:520])
+                if len(out) >= max_strings:
+                    break
+            buf = ln
+        elif starts and not buf:
+            buf = ln
+        else:
+            buf = (buf + " " + ln).strip() if buf else ln
+    if buf and len(out) < max_strings:
+        s = re.sub(r"\s+", " ", buf.strip())
+        if len(s) >= 28:
+            out.append(normalize_saved_reference_entry(s)[:520])
+    return out[:max_strings]
+
+def _pdf_stat(abspath: str) -> tuple[int, int | None]:
+    try:
+        st = os.stat(abspath)
+        return int(st.st_mtime), int(st.st_size)
+    except Exception:
+        return None
+
+def _cache_get(
+    db_path: str,
+    paper_id: int,
+    pdf_abspath: str,
+    *,
+    user_id: int,
+    max_age_days: int = 30,
+) -> tuple[str | None, list[dict] | None]:
+    """Return (excerpt_text, pages). (None, None) on miss."""
+    if not db_path or not pdf_abspath:
+        return None, None
+    st = _pdf_stat(pdf_abspath)
+    if not st:
+        return None, None
+    mtime, size = st
+    now = int(time.time())
+    try:
+        with Database(db_path).transaction() as conn:
+            row = conn.execute(
+                """
+                SELECT pdf_mtime,pdf_size,excerpt,updated_at,excerpt_pages
+                FROM paper_pdf_excerpt_cache
+                WHERE user_id=? AND paper_id=?
+                """,
+                (int(user_id), int(paper_id)),
+            ).fetchone()
+            if row is None:
+                conn.execute(
+                    """
+                    INSERT OR IGNORE INTO paper_pdf_excerpt_cache(
+                        user_id,paper_id,pdf_abspath,pdf_mtime,pdf_size,excerpt,
+                        updated_at,miss_count,last_miss_at
+                    ) VALUES(?,?,?,?,?,?,?,?,?)
+                    """,
+                    (int(user_id), int(paper_id), pdf_abspath, mtime, size, "", 0, 1, now),
+                )
+                return None, None
+            ok = int(row["pdf_mtime"] or 0) == mtime and int(row["pdf_size"] or 0) == size
+            excerpt = str(row["excerpt"] or "").strip()
+            updated_at = int(row["updated_at"] or 0)
+            pages_raw = row["excerpt_pages"]
+            expired = bool(updated_at and max_age_days > 0 and (now - updated_at) > max_age_days * 86400)
+            if ok and excerpt and not expired:
+                conn.execute(
+                    """
+                    UPDATE paper_pdf_excerpt_cache
+                    SET hit_count=hit_count+1,last_hit_at=?
+                    WHERE user_id=? AND paper_id=?
+                    """,
+                    (now, int(user_id), int(paper_id)),
+                )
+                return excerpt, _deserialize_pages(pages_raw)
+            conn.execute(
+                """
+                UPDATE paper_pdf_excerpt_cache
+                SET miss_count=miss_count+1,last_miss_at=?
+                WHERE user_id=? AND paper_id=?
+                """,
+                (now, int(user_id), int(paper_id)),
+            )
+            return None, None
+    except Exception:
+        return None, None
+
+def _serialize_pages(pages: list[dict]) -> str:
+    import json as _json
+    try:
+        return _json.dumps(pages, ensure_ascii=False)
+    except Exception:
+        return ""
+
+def _deserialize_pages(raw: str | None) -> list[dict] | None:
+    if not raw:
+        return None
+    import json as _json
+    try:
+        data = _json.loads(raw)
+        if isinstance(data, list):
+            return data
+    except Exception:
+        pass
+    return None
+
+def _cache_set(
+    db_path: str,
+    paper_id: int,
+    pdf_abspath: str,
+    excerpt: str,
+    pages: list[dict] | None = None,
+    *,
+    user_id: int,
+) -> None:
+    if not db_path or not pdf_abspath:
+        return
+    st = _pdf_stat(pdf_abspath)
+    if not st:
+        return
+    mtime, size = st
+    now = int(time.time())
+    pages_blob = _serialize_pages(pages) if pages else None
+    try:
+        with Database(db_path).transaction() as conn:
+            conn.execute(
+                """
+                INSERT INTO paper_pdf_excerpt_cache(
+                    user_id,paper_id,pdf_abspath,pdf_mtime,pdf_size,excerpt,
+                    updated_at,excerpt_pages
+                ) VALUES(?,?,?,?,?,?,?,?)
+                ON CONFLICT(user_id,paper_id) DO UPDATE SET
+                  pdf_abspath=excluded.pdf_abspath,
+                  pdf_mtime=excluded.pdf_mtime,
+                  pdf_size=excluded.pdf_size,
+                  excerpt=excluded.excerpt,
+                  updated_at=excluded.updated_at,
+                  excerpt_pages=excluded.excerpt_pages
+                """,
+                (int(user_id), int(paper_id), pdf_abspath, mtime, size, excerpt or "", now, pages_blob),
+            )
+    except Exception:
+        return
+
+def extract_pdf_text_full_cached(
+    db_path: str,
+    paper_id: int,
+    abspath: str | None,
+    *,
+    user_id: int,
+) -> tuple[str, bool]:
+    if not abspath or not os.path.isfile(abspath):
+        return "", False
+    ex, _pages = _cache_get(
+        db_path,
+        int(paper_id),
+        abspath,
+        user_id=int(user_id),
+        max_age_days=45,
+    )
+    if ex is not None:
+        return ex, True
+    return "", False
+
+def extract_pdf_pages_cached(
+    db_path: str,
+    paper_id: int,
+    abspath: str | None,
+    *,
+    user_id: int,
+) -> tuple[list[dict], bool]:
+    """Return (pages, cached). pages = list[{"page":N,"text":...}], cached=True if from cache."""
+    if not abspath or not os.path.isfile(abspath):
+        return [], False
+    _ex, pages = _cache_get(
+        db_path,
+        int(paper_id),
+        abspath,
+        user_id=int(user_id),
+        max_age_days=45,
+    )
+    if pages is not None:
+        return pages, True
+    # Cache miss for pages but maybe excerpt present without pages — recompute pages only.
+    if _ex is not None:
+        pages = extract_pdf_text_with_pages(abspath)
+        if pages:
+            _cache_set(
+                db_path,
+                int(paper_id),
+                abspath,
+                _ex,
+                pages,
+                user_id=int(user_id),
+            )
+        return pages, False
+    return [], False
+
+def _cache_delete(db_path: str, paper_id: int, *, user_id: int) -> None:
+    if not db_path:
+        return
+    try:
+        with Database(db_path).transaction() as conn:
+            conn.execute(
+                "DELETE FROM paper_pdf_excerpt_cache WHERE user_id=? AND paper_id=?",
+                (int(user_id), int(paper_id)),
+            )
+    except Exception:
+        pass
+
+def compute_and_cache_excerpt(
+    db_path: str,
+    paper_id: int,
+    pdf_abspath: str,
+    *,
+    user_id: int,
+) -> None:
+    ex = extract_pdf_text_full(pdf_abspath)
+    if ex.strip():
+        pages = extract_pdf_text_with_pages(pdf_abspath)
+        _cache_set(
+            db_path,
+            int(paper_id),
+            pdf_abspath,
+            ex,
+            pages if pages else None,
+            user_id=int(user_id),
+        )
+    else:
+        _cache_delete(db_path, int(paper_id), user_id=int(user_id))
+
+def _ensure_reader_pdf_available(
+    db: Any,
+    paper: Any,
+    *,
+    user_id: int,
+) -> str | None:
+    """阅读页兜底：库内无 PDF 但有 arXiv/pdf_url 时，现取现存一份供上下文解析。"""
+    pid = getattr(paper, "id", None)
+    if pid is None:
+        return None
+    try:
+        existing = db.get_library_pdf_abspath(
+            int(pid),
+            user_id=int(user_id),
+        )
+        if existing:
+            return existing
+    except Exception:
+        return None
+
+    if not any((getattr(paper, "arxiv_id", None), getattr(paper, "pdf_url", None), getattr(paper, "source_url", None))):
+        return None
+
+    try:
+        from ...core.paper_paths import LIBRARY_PDF_ROOT_DIR, library_pdf_relative_path
+        from ...core.pdf_download import download_paper_pdf_to_path, resolve_paper_pdf_url
+        from ...settings import get_settings
+
+        relpath = library_pdf_relative_path(getattr(paper, "category", None), int(pid), getattr(paper, "title", None))
+        data_root = os.path.dirname(os.path.abspath(getattr(db, "db_path", "")))
+        dest = os.path.join(data_root, relpath)
+        os.makedirs(os.path.join(data_root, LIBRARY_PDF_ROOT_DIR), exist_ok=True)
+        os.makedirs(os.path.dirname(dest), exist_ok=True)
+
+        mail = (getattr(get_settings(), "ncbi_email", "") or "").strip()
+        if os.path.isfile(dest) and os.path.getsize(dest) >= 256:
+            db.set_local_pdf_path(
+                int(pid),
+                relpath,
+                user_id=int(user_id),
+            )
+            return dest
+        if resolve_paper_pdf_url(paper, email=mail) and download_paper_pdf_to_path(paper, dest, email=mail):
+            db.set_local_pdf_path(
+                int(pid),
+                relpath,
+                user_id=int(user_id),
+            )
+            return dest
+    except Exception:
+        return None
+    return None
+
+def build_reader_snap(paper: Any, *, pdf_text_for_references: str = "", pdf_pages: list[dict] | None = None) -> dict[str, Any]:
+    refs_raw = getattr(paper, "references", None) or []
+    refs: list[str] = []
+    for r in refs_raw[:220]:
+        s = normalize_saved_reference_entry(str(r))
+        if len(s) >= 6:
+            refs.append(s)
+    refs_source = "db"
+    references_section_raw = ""
+    if not refs and (pdf_text_for_references or "").strip():
+        references_section_raw = extract_references_section_raw_from_pdf_text(pdf_text_for_references)
+        refs_source = "pdf_section" if references_section_raw else "none"
+    elif not refs:
+        refs_source = "none"
+    pid = getattr(paper, "id", None)
+    out: dict[str, Any] = {
+        "paper_id": int(pid) if pid is not None and int(pid) > 0 else None,
+        "title": (getattr(paper, "title", None) or "").strip(),
+        "doi": (getattr(paper, "doi", None) or "").strip(),
+        "arxiv_id": (getattr(paper, "arxiv_id", None) or "").strip(),
+        "abstract": (getattr(paper, "abstract", None) or "").strip(),
+        "keywords": [str(x) for x in (getattr(paper, "keywords", None) or [])[:32] if str(x).strip()],
+        "references": refs,
+        "references_source": refs_source,
+        "references_section_raw": references_section_raw,
+    }
+    ptf = (pdf_text_for_references or "").strip()
+    if len(ptf) >= 200:
+        out["_pdf_merged_for_structure"] = ptf
+    if pdf_pages:
+        out["_pdf_pages"] = pdf_pages
+    return out
+
+def format_paper_reader_block(
+    paper: Any,
+    pdf_excerpt: str,
+    *,
+    references_section_raw: str = "",
+    reader_artifact_block: str = "",
+    web_context: str = "",
+) -> str:
+    authors = ", ".join((a.name or "").strip() for a in (paper.authors or []) if (a.name or "").strip())
+    lines = [
+        f"标题：{paper.title}",
+        f"作者：{authors or '—'}",
+        f"年份：{paper.year if paper.year is not None else '—'}",
+        f"来源/期刊：{(paper.journal or '').strip() or '—'}",
+        f"DOI：{(paper.doi or '').strip() or '—'}",
+        f"领域分类：{getattr(paper, 'category', None) or '—'}",
+        f"摘要：\n{(paper.abstract or '').strip() or '（无摘要）'}",
+    ]
+    kw = getattr(paper, "keywords", None) or []
+    if kw:
+        lines.append(f"关键词：{', '.join(str(x) for x in kw[:32])}")
+    refs = getattr(paper, "references", None) or []
+    if refs:
+        lines.append("【参考文献条目（库内保存的 references 列表；阅读助手仅从下列字符串解析并检索，不自由主题泛搜）】")
+        for i, r in enumerate(refs[:120], start=1):
+            s = normalize_saved_reference_entry(str(r))
+            if not s:
+                continue
+            lines.append(f"  [{i}] {s[:420]}")
+    elif (references_section_raw or "").strip():
+        raw = (references_section_raw or "").strip()
+        lines.append(
+            "【参考文献区 PDF 原文摘录（未程序切条；可先调 reader_pdf_structure 得 JSON 与 entries，"
+            "再对用户相关请求用 reader_paper_lookup 且 from_pdf_references_section=true）】"
+        )
+        lines.append(raw)
+    else:
+        lines.append(
+            "【参考文献】库表未保存结构化 references，且当前未能从 PDF 摘录中定位到参考文献标题后的文本。"
+            "可换带参考文献的数据源重新保存，或由用户粘贴英文题名 / DOI。"
+        )
+    if (reader_artifact_block or "").strip():
+        lines.append((reader_artifact_block or "").strip())
+    if (web_context or "").strip():
+        lines.append(
+            "【Web 搜索补充（source_type=web；仅作背景线索，不能作为 PDF 页码引用）】\n"
+            + web_context.strip()
+        )
+    ex = (pdf_excerpt or "").strip()
+    if ex:
+        lines.append(
+            "【PDF 正文（结构化 Markdown；## 标记为自动识别的章节标题；精确内容以 PDF 视图为准）】\n"
+            + ex
+        )
+    return "\n".join(lines)
+
+def build_reader_context_for_paper(
+    db: Any,
+    paper_id: int,
+    *,
+    user_id: int,
+) -> tuple[Any | None, str, str, bool, list[dict]]:
+    p = db.get_paper_by_id(int(paper_id), user_id=int(user_id))
+    if not p:
+        return None, "", "", False, []
+    pdf_path = _ensure_reader_pdf_available(db, p, user_id=int(user_id))
+    excerpt, is_cached = extract_pdf_text_full_cached(
+        getattr(db, "db_path", ""),
+        int(paper_id),
+        pdf_path,
+        user_id=int(user_id),
+    )
+    pages: list[dict] = []
+    if pdf_path:
+        pages, _pages_cached = extract_pdf_pages_cached(
+            getattr(db, "db_path", ""),
+            int(paper_id),
+            pdf_path,
+            user_id=int(user_id),
+        )
+        if not pages and is_cached and excerpt:
+            # excerpt was cached before pages column existed; recompute lazily.
+            pages = extract_pdf_text_with_pages(pdf_path)
+    if pdf_path and not excerpt:
+        excerpt = extract_pdf_text_full(pdf_path)
+        if excerpt.strip():
+            if not pages:
+                pages = extract_pdf_text_with_pages(pdf_path)
+            _cache_set(
+                getattr(db, "db_path", ""),
+                int(paper_id),
+                pdf_path,
+                excerpt,
+                pages if pages else None,
+                user_id=int(user_id),
+            )
+    merged_for_refs = excerpt.strip()
+    refs_raw = ""
+    if not (getattr(p, "references", None) or []):
+        refs_raw = extract_references_section_raw_from_pdf_text(merged_for_refs) if merged_for_refs else ""
+    # Web snippets are ephemeral context, not the paper's abstract or PDF text.
+    web_context = ""
+    if not (p.abstract or "").strip() and not excerpt.strip() and p.title:
+        try:
+            from ...settings import get_settings as _gs
+            _ak = getattr(_gs(), "tavily_api_key", "").strip()
+            if _ak:
+                import httpx
+                _resp = httpx.post("https://api.tavily.com/search", json={
+                    "api_key": _ak, "query": f"{p.title} paper",
+                    "max_results": 5, "include_answer": True, "search_depth": "advanced"}, timeout=20.0)
+                _resp.raise_for_status()
+                _parts = []
+                for _it in (_resp.json().get("results") or []):
+                    _c = _it.get("content", "")
+                    if _c and len(_c) > 80: _parts.append(_c)
+                _full = "\n\n".join(_parts)[:4000]
+                if _full:
+                    web_context = _full[:2000]
+        except Exception:
+            logger.debug("reader web abstract enrichment failed", exc_info=True)
+    reader_artifact_block = ""
+    if merged_for_refs:
+        try:
+            from .paper_reader_artifact import ensure_reader_artifact, format_reader_artifact_block
+
+            artifact = ensure_reader_artifact(
+                getattr(db, "db_path", ""),
+                int(paper_id),
+                p,
+                merged_for_refs,
+                pdf_path,
+            )
+            reader_artifact_block = format_reader_artifact_block(artifact)
+        except Exception:
+            reader_artifact_block = ""
+    block = format_paper_reader_block(
+        p,
+        excerpt,
+        references_section_raw=refs_raw,
+        reader_artifact_block=reader_artifact_block,
+        web_context=web_context,
+    )
+    # Detect if PDF is still being parsed: if paper has a PDF path but no excerpt cached yet
+    pdf_parsing = False
+    try:
+        pdf_path = db.get_library_pdf_abspath(
+            int(paper_id),
+            user_id=int(user_id),
+        )
+        if pdf_path and os.path.isfile(pdf_path):
+            # Check if excerpt is empty or too short — means parsing hasn't completed
+            pdf_parsing = len((excerpt or "").strip()) < 200
+    except Exception:
+        pass
+    return p, block, merged_for_refs, pdf_parsing, pages

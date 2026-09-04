@@ -1,0 +1,13 @@
+# Validated core versions for the current Windows full-RAG environment.
+# Install application dependencies with:
+#   pip install -r requirements-dev.txt -r requirements-rag.txt -c requirements-rag-constraints.txt
+#
+# Torch is intentionally excluded: choose the host-specific CPU/CUDA wheel
+# first, then install these constraints.  See docs/ENVIRONMENT.md.
+docling==2.115.0
+docling-core==2.88.0
+lancedb==0.34.0
+pyarrow==25.0.0
+tiktoken==0.13.0
+rapidocr==3.9.2
+onnxruntime==1.28.0

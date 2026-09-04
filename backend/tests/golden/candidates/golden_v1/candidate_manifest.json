@@ -1,0 +1,52 @@
+{
+  "schema_version": 1,
+  "candidate_id": "papergraph_golden_candidate_v1",
+  "quality_status": "golden_candidate",
+  "review_status": "pending_user_review",
+  "created_at": "2026-07-28",
+  "construction_method": "deterministic evidence-first curation from held-out active canonical chunks; no retrieval score or model output was used to select, tune, accept, or reject a case",
+  "generator_model": "deterministic-evidence-first-curation",
+  "generator_prompt_version": "golden-candidate-evidence-first-v1",
+  "verifier_model": "deterministic-canonical-validator-v1",
+  "corpus_manifest": "../../corpus_manifest.json",
+  "cases_path": "retrieval_questions.jsonl",
+  "execution_policy": {
+    "allowed_before_user_review": [
+      "schema and provenance validation",
+      "human content review"
+    ],
+    "blocked_before_user_review": [
+      "sparse retrieval scoring",
+      "dense retrieval scoring",
+      "rerank scoring",
+      "parameter tuning based on candidate cases",
+      "reporting any metric as Golden"
+    ],
+    "promotion_requirement": "User approval plus an immutable reviewed copy promoted to frozen_gold with review_status=approved."
+  },
+  "scope": {
+    "case_count": 10,
+    "answerable_case_count": 10,
+    "held_out_corpus_ids": [
+      "arxiv_2310_11511",
+      "arxiv_2401_15884",
+      "arxiv_2402_03216",
+      "arxiv_2407_01523",
+      "acl_2024_ccl_2_9"
+    ],
+    "query_languages": {
+      "en": 6,
+      "mixed": 2,
+      "zh": 2
+    },
+    "document_languages": {
+      "en": 8,
+      "zh": 2
+    }
+  },
+  "validation": {
+    "command": "run_rag_eval.py validate --cases tests/golden/candidates/golden_v1/retrieval_questions.jsonl",
+    "verified_chunk_qrel_count": 10,
+    "status": "passed"
+  }
+}

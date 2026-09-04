@@ -1,0 +1,16 @@
+# Optional Phase 2 document-RAG stack.
+# Install this file in the same environment as requirements.txt.
+docling>=2.115,<3
+lancedb>=0.34,<1
+pyarrow>=15,<26
+tiktoken>=0.7,<1
+# Current Docling OCR integration uses the maintained rapidocr package, not
+# the old rapidocr-onnxruntime distribution.  Keep ONNX Runtime explicit so a
+# fresh RAG environment has the same local OCR capability as the validated
+# Windows environment.
+rapidocr>=3.9,<4
+onnxruntime>=1.28,<2
+
+# PyTorch is intentionally not pinned here: choose the CUDA/CPU wheel that
+# matches the deployment host before installing this file.  Docling will use
+# the available torch runtime for layout/table models.

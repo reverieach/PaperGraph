@@ -1,0 +1,28 @@
+{
+  "schema_version": 1,
+  "benchmark_id": "beir_scifact_subset_v1",
+  "name": "BEIR SciFact fixed functional subset",
+  "archive_sha256": "536e14446a0ba56ed1398ab1055f39fe852686ecad24a6306c80c490fa8e0165",
+  "archive_members": {
+    "corpus": "scifact/corpus.jsonl",
+    "queries": "scifact/queries.jsonl",
+    "qrels": "scifact/qrels/test.tsv"
+  },
+  "source_urls": [
+    "https://huggingface.co/datasets/BeIR/scifact",
+    "https://github.com/beir-cellar/beir/wiki/Datasets-available"
+  ],
+  "license_or_usage_note": "SciFact is imported only as a fixed, attribution-preserving public text-retrieval diagnostic subset. The Hugging Face dataset card lists CC BY-SA 4.0; retain its license and source attribution when redistributing derived artifacts.",
+  "selection": {
+    "split": "test",
+    "seed": "papergraph-scifact-v1-20260728",
+    "query_limit": 60,
+    "document_limit": 300,
+    "algorithm": "deterministically order positive-qrel test queries by SHA-256(seed, query_id); include all positive documents first, then fill remaining bounded corpus slots with deterministically ordered non-relevant documents"
+  },
+  "scope_boundary": [
+    "This scorecard exercises title/abstract text retrieval only.",
+    "It does not evaluate PDF parsing, layout handling, page citations, answer generation, or RAG faithfulness.",
+    "It is diagnostic and must not be reported as a Golden result or a production benchmark."
+  ]
+}

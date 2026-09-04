@@ -1,0 +1,49 @@
+{
+  "schema_version": 1,
+  "run_id": "silver_retrieval_v1",
+  "quality_status": "silver",
+  "review_status": "auto_verified",
+  "created_at": "2026-07-28",
+  "construction_method": "deterministic evidence-first curation from active canonical chunks; no LLM generated its own evidence or pass/fail judgment",
+  "generator_model": "deterministic-evidence-first-curation",
+  "generator_prompt_version": "evidence-first-v1",
+  "verifier_model": "deterministic-canonical-validator-v1",
+  "corpus_manifest": "../corpus_manifest.json",
+  "cases_path": "../silver/retrieval_questions.jsonl",
+  "scope": {
+    "case_count": 18,
+    "answerable_case_count": 17,
+    "unanswerable_case_count": 1,
+    "source_corpus_ids": [
+      "arxiv_1706_03762",
+      "arxiv_1810_04805",
+      "arxiv_2005_11401",
+      "arxiv_2210_03629",
+      "arxiv_2307_03172",
+      "arxiv_2404_16130",
+      "arxiv_2407_01449",
+      "arxiv_2408_09869"
+    ],
+    "query_languages": {
+      "en": 12,
+      "mixed": 6
+    }
+  },
+  "validation": {
+    "command": "run_rag_eval.py validate --cases tests/golden/silver/retrieval_questions.jsonl",
+    "verified_chunk_qrel_count": 18,
+    "status": "passed"
+  },
+  "baseline_sparse": {
+    "command": "run_rag_eval.py retrieval --cases tests/golden/silver/retrieval_questions.jsonl --limit 10",
+    "recall_at_10": 1.0,
+    "mrr_at_10": 0.780462,
+    "evidence_complete_at_10": 1.0,
+    "status": "diagnostic_only_not_frozen_golden"
+  },
+  "known_limits": [
+    "The 13-paper corpus expansion is intentionally held out from this v1 Silver baseline until its canonical chunks are inspected and separately labeled.",
+    "No answer-generation or citation-quality metric is claimed by this retrieval-only Silver set.",
+    "The no-answer case is retained for later Reader abstention/citation testing; retrieval itself is not expected to return an empty list."
+  ]
+}
